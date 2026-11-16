@@ -14,7 +14,7 @@ finish() {
     read -r -p "按回车键关闭窗口..." || true
 }
 
-echo "流量账本"
+echo "Traffic Ledger · 流量账本"
 echo
 
 if ! ready; then

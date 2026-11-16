@@ -14,8 +14,8 @@ keywords = ["macos", "mihomo", "clash", "traffic", "sqlite"]
 classifiers = ["Operating System :: MacOS", "Programming Language :: Python :: 3"]
 
 [project.urls]
-Homepage = "https://github.com/OHHHHHHei/mac-traffic-ledger"
-Issues = "https://github.com/OHHHHHHei/mac-traffic-ledger/issues"
+Homepage = "https://github.com/OHHHHHHei/traffic-ledger"
+Issues = "https://github.com/OHHHHHHei/traffic-ledger/issues"
 
 [project.scripts]
 mac-traffic-ledger = "mac_traffic_ledger.ledger:main"

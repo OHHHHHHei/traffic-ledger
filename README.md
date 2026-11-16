@@ -1,4 +1,4 @@
-# Mac Traffic Ledger
+# Traffic Ledger
 
 **查看每个进程通过代理传了多少数据，以及流量去了哪里。**
 
@@ -27,8 +27,8 @@
 ## 快速开始
 
 ```sh
-git clone https://github.com/OHHHHHHei/mac-traffic-ledger.git
-cd mac-traffic-ledger
+git clone https://github.com/OHHHHHHei/traffic-ledger.git
+cd traffic-ledger
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
