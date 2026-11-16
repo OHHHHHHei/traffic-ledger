@@ -121,6 +121,24 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(pages[0]["count"], 125)
         self.assertNotIn("trend", pages[0])
 
+    def test_nearby_pages_reuse_ranking_until_explicit_refresh(self):
+        self.seed(125)
+        first = self.query(view="connections")
+        self.c.ingest(snapshot(125, 110, 220), {}, self.now + 2)
+        self.c.flush(self.now + 2)
+
+        next_page = self.query(view="connections", page=1, reuse_ranking=1)
+        self.assertEqual(next_page["ranked_at"], first["ranked_at"])
+        self.assertEqual(next_page["count"], 125)
+        self.assertEqual({row["up"] for row in next_page["connections"]}, {100})
+        self.assertFalse(
+            {row["id"] for row in next_page["connections"]}
+            & {row["id"] for row in first["connections"]}
+        )
+
+        refreshed = self.query(view="connections", page=1)
+        self.assertEqual({row["up"] for row in refreshed["connections"]}, {110})
+
     def test_long_range_trend_is_bounded_and_keeps_total(self):
         self.c.ingest(snapshot(up=0, down=0), {}, self.now)
         for i in range(1, 501):

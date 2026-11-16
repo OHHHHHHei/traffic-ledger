@@ -25,6 +25,9 @@ STATUS = {
     "retention_days": 30,
 }
 LOCK = threading.RLock()
+RANKINGS = collections.OrderedDict()
+RANKING_PAGES = 5
+RANKING_TTL = 120
 
 
 @contextmanager
@@ -517,6 +520,71 @@ def overview_traffic(c, start, end, filters, args, step):
     return summary, processes, hosts, trend
 
 
+def connection_page(c, start, end, filters, args, page, page_size, reuse):
+    # Rank only IDs and byte counts; read full metadata for the requested page.
+    # Keep a small block so nearby pages can reuse the same ordering and count.
+    block = page // RANKING_PAGES
+    block_size = page_size * RANKING_PAGES
+    key = (DATA, start, end, tuple(filters), tuple(args), block)
+    with LOCK:
+        entry = RANKINGS.get(key) if reuse else None
+        if entry and time.monotonic() - entry[0] < RANKING_TTL:
+            RANKINGS.move_to_end(key)
+        else:
+            entry = None
+    if entry is None:
+        where = " AND ".join(["s.bucket>=?", "s.bucket<?", *filters])
+        ranked_at = time.time()
+        ranked = c.execute(
+            """
+            WITH traffic AS MATERIALIZED (
+                SELECT s.id, SUM(s.up) up, SUM(s.down) down
+                FROM samples s JOIN connections c ON c.id=s.id WHERE
+            """
+            + where
+            + """
+                GROUP BY s.id
+            ), ranked AS (
+                SELECT id, up, down FROM traffic ORDER BY up+down DESC,id
+                LIMIT ? OFFSET ?
+            )
+            SELECT id,up,down FROM ranked
+            UNION ALL SELECT NULL,COUNT(*),0 FROM traffic
+            """,
+            [start, end, *args, block_size, block * block_size],
+        ).fetchall()
+        count = ranked.pop()[1]
+        entry = (time.monotonic(), ranked_at, count, ranked)
+        with LOCK:
+            RANKINGS[key] = entry
+            RANKINGS.move_to_end(key)
+            while len(RANKINGS) > 8:
+                RANKINGS.popitem(last=False)
+    _, ranked_at, count, ranked = entry
+    offset = (page % RANKING_PAGES) * page_size
+    picked = ranked[offset : offset + page_size]
+    if not picked:
+        return [], count, ranked_at
+    details = {
+        r["id"]: dict(r)
+        for r in c.execute(
+            "SELECT * FROM connections WHERE id IN ("
+            + ",".join("?" for _ in picked)
+            + ")",
+            [r["id"] for r in picked],
+        )
+    }
+    return (
+        [
+            dict(details[ident], up=up, down=down)
+            for ident, up, down in picked
+            if ident in details
+        ],
+        count,
+        ranked_at,
+    )
+
+
 def query(q):
     now = time.time()
     start = float(q.get("start", [str(now - 86400)])[0])
@@ -577,26 +645,22 @@ def query(q):
                 raise ValueError("Invalid process filter")
             args.extend([p[1], p[0]])
         if view == "connections":
-            base = (
-                " FROM samples s JOIN connections c ON c.id=s.id WHERE "
-                + " AND ".join(["s.bucket>=?", "s.bucket<?", *wh])
+            rows, count, ranked_at = connection_page(
+                c,
+                start,
+                end,
+                wh,
+                args,
+                page,
+                page_size,
+                q.get("reuse_ranking", [""])[0] == "1",
             )
-            args = [start, end, *args]
-            rows = [
-                dict(r)
-                for r in c.execute(
-                    "SELECT c.*,SUM(s.up) up,SUM(s.down) down"
-                    + base
-                    + " GROUP BY c.id ORDER BY SUM(s.up+s.down) DESC,c.id LIMIT ? OFFSET ?",
-                    args + [page_size, page * page_size],
-                )
-            ]
-            count = c.execute("SELECT COUNT(DISTINCT c.id)" + base, args).fetchone()[0]
             return {
                 "connections": rows,
                 "count": count,
                 "page": page,
                 "page_size": page_size,
+                "ranked_at": ranked_at,
                 "status": dict(STATUS),
             }
         trend_step = max(60, ((end - start + 119) // 120 + 59) // 60 * 60)
