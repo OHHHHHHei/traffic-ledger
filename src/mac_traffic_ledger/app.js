@@ -18,7 +18,7 @@ function bytes(n) {
 }
 
 function date(n) {return new Date(n * 1000).toLocaleString('zh-CN', {hour12:false});}
-function shortDate(n) {return new Date(n * 1000).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});}
+function shortDate(n, seconds = false) {return new Date(n * 1000).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',second:seconds?'2-digit':undefined,hour12:false});}
 function params(reuseRanking = false) {
   const now = new Date(); let start = new Date(now), end = now, r = $('range').value;
   if (r === 'today') start.setHours(0,0,0,0);
@@ -61,6 +61,43 @@ function updateSelection() {
   $('filter').classList.toggle('hidden', !selected);
   $('selectedName').textContent = selected ? '进程 / '+JSON.parse(selected)[0] : '';
 }
+const chart = $('chart'), trendTooltip = $('trendTooltip');
+let trendBins = [], activeBin = -1;
+function showTrendBin(index) {
+  const bin = trendBins[index];
+  chart.children[activeBin]?.classList.remove('is-active');
+  activeBin = bin ? index : -1;
+  if (!bin) {
+    trendTooltip.hidden = true;
+    return;
+  }
+  const bar = chart.children[index];
+  bar.classList.add('is-active');
+  const end = shortDate(bin.end, bin.end % 60 !== 0);
+  $('trendInterval').textContent = shortDate(bin.start)+' 至 '+end;
+  $('trendTotal').textContent = '合计 '+bytes(bin.up + bin.down);
+  $('trendBreakdown').textContent = '上传 '+bytes(bin.up)+' · 下载 '+bytes(bin.down);
+  trendTooltip.hidden = false;
+  const panel = $('trendPanel').getBoundingClientRect(), rect = bar.getBoundingClientRect();
+  const width = trendTooltip.offsetWidth;
+  const left = rect.left - panel.left + (rect.width - width) / 2;
+  trendTooltip.style.left = Math.max(0, Math.min(left, panel.width - width))+'px';
+  trendTooltip.style.top = (rect.top - panel.top - 6)+'px';
+}
+chart.addEventListener('pointerover', e=>{
+  const index = Number(e.target.dataset.bin);
+  if (Number.isInteger(index) && index !== activeBin) showTrendBin(index);
+});
+chart.addEventListener('pointerleave', ()=>showTrendBin(-1));
+chart.addEventListener('blur', ()=>showTrendBin(-1));
+chart.addEventListener('keydown', e=>{
+  if (e.key === 'Escape') showTrendBin(-1);
+  else if (trendBins.length && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    e.preventDefault();
+    const index = activeBin < 0 ? trendBins.length-1 : activeBin + (e.key === 'ArrowLeft' ? -1 : 1);
+    showTrendBin(Math.max(0, Math.min(index, trendBins.length-1)));
+  }
+});
 function renderOverview(d) {
   const s = d.summary;
   $('total').textContent = bytes(s.up+s.down);$('up').textContent = bytes(s.up);$('down').textContent = bytes(s.down);
@@ -74,15 +111,22 @@ function renderOverview(d) {
   $('hosts').innerHTML = table(['访问目标 / 出口','上传','下载'], d.hosts.map(r=>'<tr><td class="domain">'+esc(r.host)+'<span class="path" title="'+esc(r.node)+'">'+esc(r.route)+' · '+esc(r.node)+'</span></td><td class="num">'+bytes(r.up)+'</td><td class="num">'+bytes(r.down)+'</td></tr>'));
   // Keep chronological spacing even when no connections transferred data in a bucket.
   const points = new Map(d.trend.map(r=>[r.bucket,r]));
-  const first = Math.floor(d.range[0]/d.trend_step)*d.trend_step, last = Math.min(d.range[1],Date.now()/1000);
-  const bins=[];for(let bucket=first;bucket<last&&bins.length<122;bucket+=d.trend_step) bins.push(points.get(bucket)||{bucket,up:0,down:0});
+  const first = Math.floor(d.range[0]/d.trend_step)*d.trend_step, last = Math.min(d.range[1],Math.floor(Date.now()/1000));
+  const previousBin = trendBins[activeBin];
+  const bins=[];
+  for(let bucket=first;bucket<last&&bins.length<122;bucket+=d.trend_step) {
+    const point = points.get(bucket) || {up:0,down:0};
+    bins.push({start:Math.max(bucket,d.range[0]),end:Math.min(last,bucket+d.trend_step),up:point.up,down:point.down});
+  }
   // Each bucket occupies 6px plus a 2px gap; leave unused space on the left.
   $('trendPlot').style.setProperty('--trend-width', Math.max(6,bins.length*8-2)+'px');
   $('chartStart').classList.toggle('hidden',bins.length<24);
   const peak=Math.max(1,...bins.map(r=>r.up+r.down));
-  $('chart').innerHTML=bins.map(r=>'<span title="'+shortDate(r.bucket)+' · ↑ '+bytes(r.up)+' / ↓ '+bytes(r.down)+'" style="height:'+(r.up+r.down ? Math.max(2,(r.up+r.down)/peak*100):1)+'%;opacity:'+(r.up+r.down?'.8':'.12')+'"></span>').join('');
+  trendBins = bins;
+  chart.innerHTML=bins.map((r,i)=>'<span data-bin="'+i+'" style="--bar-height:'+(r.up+r.down ? Math.max(2,(r.up+r.down)/peak*100):1)+'%;--bar-opacity:'+(r.up+r.down?'.8':'.12')+'"></span>').join('');
+  if (previousBin) showTrendBin(bins.findIndex(r=>r.start===previousBin.start));
   $('trendUnit').textContent='每 '+Math.round(d.trend_step/60)+' 分钟合计 · 悬停查看';
-  $('chartStart').textContent=shortDate(d.range[0]);$('chartEnd').textContent=shortDate(Math.min(d.range[1],Date.now()/1000));
+  $('chartStart').textContent=shortDate(d.range[0]);$('chartEnd').textContent=shortDate(last);
   $('quality').textContent=(s.up+s.down ? ((1-s.unknown/(s.up+s.down))*100).toFixed(2)+'% 已识别':'尚无流量')+' · 未知 '+bytes(s.unknown);
   $('health').textContent='全部路由计数增量 '+bytes(d.health.core)+'；逐次未归属差额估计 '+bytes(d.health.missed)+'；超过 5 秒的采样间隔 '+d.health.gaps+' 次。';
 }
