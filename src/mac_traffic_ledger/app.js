@@ -5,12 +5,13 @@ let view = 'overview', selected = '', page = 0, generation = 0, request = null, 
 const recentResults = new Map();
 let theme = 'system';
 try { theme = localStorage.getItem('ledger-theme') || 'system'; } catch (_) {}
+const systemTheme = matchMedia('(prefers-color-scheme: dark)');
 function applyTheme() {
-  if (theme === 'system') delete document.documentElement.dataset.theme;
-  else document.documentElement.dataset.theme = theme;
+  document.documentElement.dataset.theme = theme === 'system' ? (systemTheme.matches ? 'dark' : 'light') : theme;
   $('theme').textContent = '主题：' + ({system:'系统',light:'浅色',dark:'深色'}[theme] || '系统');
 }
 applyTheme();
+systemTheme.addEventListener('change', applyTheme);
 $('theme').onclick = () => {theme = ({system:'light',light:'dark',dark:'system'})[theme] || 'system';try {localStorage.setItem('ledger-theme', theme);} catch (_) {}applyTheme();};
 function bytes(n) {
   const mb = (Number(n) || 0) / 1000000;

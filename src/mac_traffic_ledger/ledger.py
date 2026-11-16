@@ -1,11 +1,26 @@
 #!/usr/bin/env python3
 """Local macOS/Mihomo traffic ledger. Python standard library only."""
 
-import collections, csv, ctypes, datetime as dt, http.client, io, json, os, signal, socket, sqlite3, subprocess, tempfile, threading, time, math
-from pathlib import Path
+import collections
+import csv
+import ctypes
+import datetime as dt
+import http.client
+import io
+import json
+import math
+import os
+import signal
+import socket
+import sqlite3
+import subprocess
+import tempfile
+import threading
+import time
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parent
 DATA = Path(
@@ -53,7 +68,7 @@ def init():
   CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT);
   """)
         c.execute("INSERT OR IGNORE INTO meta VALUES('created',?)", (str(time.time()),))
-        c.execute("UPDATE connections SET active=0")
+        c.execute("UPDATE connections SET active=0 WHERE active=1")
 
 
 def socket_paths():
@@ -112,6 +127,7 @@ def socket_owners():
         capture_output=True,
         text=True,
         timeout=5,
+        check=False,
     )
     owners = collections.defaultdict(set)
     pid = 0
@@ -182,7 +198,7 @@ def identify(m, owners):
 
 
 def delta(current, previous):
-    return max(0, current - previous) if current >= previous else max(0, current)
+    return current - previous if current >= previous else max(0, current)
 
 
 class Collector:
@@ -369,13 +385,19 @@ class Collector:
                 cd = delta(d["downloadTotal"], self.total[1])
             gap = int(self.last is not None and now - self.last > 5)
             c.execute(
-                "INSERT INTO health VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(bucket) DO UPDATE SET core_up=core_up+excluded.core_up,core_down=core_down+excluded.core_down,seen_up=seen_up+excluded.seen_up,seen_down=seen_down+excluded.seen_down,missed_up=missed_up+excluded.missed_up,missed_down=missed_down+excluded.missed_down,gaps=gaps+excluded.gaps",
+                """
+                INSERT INTO health(bucket,core_up,core_down,missed_up,missed_down,gaps)
+                VALUES(?,?,?,?,?,?) ON CONFLICT(bucket) DO UPDATE SET
+                    core_up=core_up+excluded.core_up,
+                    core_down=core_down+excluded.core_down,
+                    missed_up=missed_up+excluded.missed_up,
+                    missed_down=missed_down+excluded.missed_down,
+                    gaps=gaps+excluded.gaps
+                """,
                 (
                     bucket,
                     cu,
                     cd,
-                    seenup,
-                    seendown,
                     max(0, cu - seenup),
                     max(0, cd - seendown),
                     gap,
@@ -429,9 +451,14 @@ class Collector:
                     )
                     for x in d.get("connections", [])
                 )
-                owners = socket_owners() if needs_owner else {}
+                owners = {}
                 if needs_owner:
                     self.owner_scan = now
+                    try:
+                        owners = socket_owners()
+                    except (OSError, subprocess.TimeoutExpired):
+                        # The snapshot still contains valid byte counters.
+                        pass
                 self.ingest(d, owners, now)
                 failures = 0
                 with LOCK:
@@ -746,7 +773,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
             self.end_headers()
             self.wfile.write(data)
-        except (ValueError, TypeError, OverflowError, json.JSONDecodeError):
+        except (ValueError, TypeError, OverflowError):
             self.send_error(400)
         except BrokenPipeError:
             pass

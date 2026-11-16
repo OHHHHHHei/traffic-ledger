@@ -1,13 +1,15 @@
 import copy
 import csv
 import io
-import json
 import pathlib
+import subprocess
 import tempfile
 import threading
 import unittest
 import urllib.error
 import urllib.request
+from unittest.mock import Mock, patch
+
 from mac_traffic_ledger import ledger as l
 
 
@@ -99,6 +101,35 @@ class ReleaseTests(unittest.TestCase):
             self.c.ingest(bad, {}, self.now + 2)
         self.c.ingest(snapshot(up=20, down=40), {}, self.now + 10)
         self.assertEqual(self.totals(), (20, 40))
+
+    def test_owner_lookup_timeout_does_not_drop_short_connection(self):
+        seen = snapshot(up=105, down=20)
+        seen["connections"][0]["metadata"] = {"host": "example.test"}
+        closed = {**seen, "connections": []}
+        stop = Mock()
+        stop.is_set.side_effect = [False, False, False, True]
+        with (
+            patch.object(l, "STOP", stop),
+            patch.object(l, "snapshot", side_effect=[snapshot(0), seen, closed]),
+            patch.object(
+                l, "socket_owners", side_effect=subprocess.TimeoutExpired("lsof", 5)
+            ),
+        ):
+            self.c.run()
+        self.assertEqual(self.totals(), (105, 20))
+        with l.connect() as db:
+            self.assertEqual(
+                db.execute("SELECT attribution FROM connections").fetchone()[0],
+                "unknown",
+            )
+            self.assertEqual(
+                tuple(
+                    db.execute(
+                        "SELECT SUM(missed_up),SUM(missed_down) FROM health"
+                    ).fetchone()
+                ),
+                (0, 0),
+            )
 
     def test_write_threshold_forces_early_commit(self):
         self.c.ingest(snapshot(1800, 0, 0), {}, self.now)

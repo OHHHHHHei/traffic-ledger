@@ -60,7 +60,7 @@ python3 scripts/manage.py status
 
 ```sh
 python3 scripts/manage.py stop       # 停止本次会话；下次登录仍启动
-python3 scripts/manage.py start      # 再次启动已安装的服务
+python3 scripts/manage.py start      # 启动服务，首次运行时安装
 python3 scripts/manage.py uninstall  # 停止并取消自动启动，保留数据库
 ```
 
