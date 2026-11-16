@@ -98,10 +98,16 @@ function renderDaily(d) {
   $('dailyTotal').textContent=bytes(d.rows.reduce((s,r)=>s+r.up+r.down,0));
   $('daily').innerHTML=table(['日期','进程 / 路径','路由','上传','下载','合计'],d.rows.map(r=>cells([esc(r.day),esc(r.process)+'<span class="path" title="'+esc(r.path)+'">'+esc(r.path)+'</span>',esc(r.route),bytes(r.up),bytes(r.down),bytes(r.up+r.down)])));
 }
-async function refresh() {
+let refreshTimer = null;
+async function refresh(showLoading = true) {
+  clearTimeout(refreshTimer);
   const ticket=++generation;if(request) request.abort();request=new AbortController();
+  $('loading').classList.toggle('hidden', !showLoading);
+  let delay = 10000;
   try {
-    const response=await fetch('/api/data?'+params(),{signal:request.signal});
+    const query = params();
+    if (Number(query.get('end')) - Number(query.get('start')) > 86400) delay = 60000;
+    const response=await fetch('/api/data?'+query,{signal:request.signal});
     if(!response.ok) throw Error('读取失败（'+response.status+'），请稍后重试。');
     const d=await response.json();if(ticket!==generation)return;
     $('error').classList.add('hidden');updateState(d);
@@ -109,7 +115,15 @@ async function refresh() {
   } catch(e) {
     if(e.name==='AbortError'||ticket!==generation)return;
     $('error').textContent=e.message;$('error').classList.remove('hidden');
-  } finally {if(ticket===generation)request=null;}
+  } finally {
+    if (ticket === generation) {
+      request = null;
+      $('loading').classList.add('hidden');
+      if (!document.hidden && view === 'overview') {
+        refreshTimer = setTimeout(() => refresh(false), delay);
+      }
+    }
+  }
 }
 function resetFilters() {page=0;paginationEnd=null;refresh();}
 for(const id of ['range','route','from','to']) $(id).onchange=()=>{
@@ -122,10 +136,10 @@ $('prev').onclick=()=>{page=Math.max(0,page-1);refresh();};$('next').onclick=()=
 $('export').onclick=()=>{try{location.href='/api/export?'+params();}catch(e){$('error').textContent=e.message;$('error').classList.remove('hidden');}};
 document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>setView(b.dataset.view));
 const today=new Date();today.setMinutes(today.getMinutes()-today.getTimezoneOffset());$('from').value=$('to').value=today.toISOString().slice(0,10);
-let refreshTimer=null;
-function schedule() {
-  clearTimeout(refreshTimer);if(document.hidden)return;
-  refreshTimer=setTimeout(()=>{if(view==='overview'&&!request)refresh();schedule();},10000);
-}
-document.addEventListener('visibilitychange',()=>{if(!document.hidden&&view==='overview')refresh();else if(document.hidden&&request)request.abort();schedule();});
-refresh();schedule();
+document.addEventListener('visibilitychange',()=>{
+  if (document.hidden) {
+    clearTimeout(refreshTimer);
+    if (request) request.abort();
+  } else if (view === 'overview') refresh();
+});
+refresh();

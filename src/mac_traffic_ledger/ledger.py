@@ -455,6 +455,68 @@ class Collector:
         self.close()
 
 
+def overview_traffic(c, start, end, filters, args, step):
+    # Collapse repeated samples before joining connection metadata. All four
+    # aggregates then share the same intermediate rows within this query.
+    where = " WHERE " + " AND ".join(filters) if filters else ""
+    rows = c.execute(
+        """
+        WITH bins AS (
+            SELECT s.id, s.bucket / ? bin, SUM(s.up) up, SUM(s.down) down
+            FROM samples s WHERE s.bucket>=? AND s.bucket<?
+            GROUP BY s.id, bin
+        ), traffic AS MATERIALIZED (
+            SELECT b.*, c.process, c.path, c.attribution,
+                   COALESCE(NULLIF(c.host,''),c.ip) host, c.route, c.node
+            FROM bins b JOIN connections c ON c.id=b.id
+        """
+        + where
+        + """
+        )
+        SELECT 'summary', NULL, NULL, NULL, COALESCE(SUM(up),0),
+               COALESCE(SUM(down),0), COUNT(DISTINCT id),
+               COALESCE(SUM(CASE WHEN attribution='unknown' THEN up+down ELSE 0 END),0)
+        FROM traffic
+        UNION ALL
+        SELECT 'process', process, path, NULL, SUM(up), SUM(down), COUNT(DISTINCT id), 0
+        FROM traffic GROUP BY process, path
+        UNION ALL
+        SELECT 'host', host, route, node, up, down, connections, 0 FROM (
+            SELECT host, route, node, SUM(up) up, SUM(down) down, COUNT(DISTINCT id) connections
+            FROM traffic GROUP BY host, route, node ORDER BY SUM(up+down) DESC LIMIT 100
+        )
+        UNION ALL
+        SELECT 'trend', bin, NULL, NULL, SUM(up), SUM(down), 0, 0 FROM traffic GROUP BY bin
+        """,
+        [step, start, end, *args],
+    )
+    processes, hosts, trend = [], [], []
+    for kind, first, second, third, up, down, count, unknown in rows:
+        if kind == "summary":
+            summary = dict(up=up, down=down, connections=count, unknown=unknown)
+        elif kind == "process":
+            processes.append(
+                dict(process=first, path=second, up=up, down=down, connections=count)
+            )
+        elif kind == "host":
+            hosts.append(
+                dict(
+                    host=first,
+                    route=second,
+                    node=third,
+                    up=up,
+                    down=down,
+                    connections=count,
+                )
+            )
+        else:
+            trend.append(dict(bucket=first * step, up=up, down=down))
+    processes.sort(key=lambda r: r["up"] + r["down"], reverse=True)
+    hosts.sort(key=lambda r: r["up"] + r["down"], reverse=True)
+    trend.sort(key=lambda r: r["bucket"])
+    return summary, processes, hosts, trend
+
+
 def query(q):
     now = time.time()
     start = float(q.get("start", [str(now - 86400)])[0])
@@ -494,8 +556,8 @@ def query(q):
                 )
             ]
             return {"rows": rows, "status": dict(STATUS), "meta": meta}
-        wh = ["s.bucket>=?", "s.bucket<?"]
-        args = [start, end]
+        wh = []
+        args = []
         if route != "ALL":
             wh.append("c.route=?")
             args.append(route)
@@ -514,10 +576,12 @@ def query(q):
             ):
                 raise ValueError("Invalid process filter")
             args.extend([p[1], p[0]])
-        base = " FROM samples s JOIN connections c ON c.id=s.id WHERE " + " AND ".join(
-            wh
-        )
         if view == "connections":
+            base = (
+                " FROM samples s JOIN connections c ON c.id=s.id WHERE "
+                + " AND ".join(["s.bucket>=?", "s.bucket<?", *wh])
+            )
+            args = [start, end, *args]
             rows = [
                 dict(r)
                 for r in c.execute(
@@ -535,42 +599,10 @@ def query(q):
                 "page_size": page_size,
                 "status": dict(STATUS),
             }
-        summary = dict(
-            c.execute(
-                'SELECT COALESCE(SUM(s.up),0) up,COALESCE(SUM(s.down),0) down,COUNT(DISTINCT c.id) connections,COALESCE(SUM(CASE WHEN c.attribution="unknown" THEN s.up+s.down ELSE 0 END),0) unknown'
-                + base,
-                args,
-            ).fetchone()
-        )
-        processes = [
-            dict(r)
-            for r in c.execute(
-                "SELECT c.process,c.path,SUM(s.up) up,SUM(s.down) down,COUNT(DISTINCT c.id) connections"
-                + base
-                + " GROUP BY c.process,c.path ORDER BY SUM(s.up+s.down) DESC",
-                args,
-            )
-        ]
-        hosts = [
-            dict(r)
-            for r in c.execute(
-                'SELECT COALESCE(NULLIF(c.host,""),c.ip) host,c.route,c.node,SUM(s.up) up,SUM(s.down) down,COUNT(DISTINCT c.id) connections'
-                + base
-                + " GROUP BY host,c.route,c.node ORDER BY SUM(s.up+s.down) DESC LIMIT 100",
-                args,
-            )
-        ]
-        rows = []
         trend_step = max(60, ((end - start + 119) // 120 + 59) // 60 * 60)
-        trend = [
-            dict(r)
-            for r in c.execute(
-                "SELECT CAST(s.bucket / ? AS INTEGER)*? bucket,SUM(s.up) up,SUM(s.down) down"
-                + base
-                + " GROUP BY CAST(s.bucket / ? AS INTEGER) ORDER BY bucket",
-                [trend_step, trend_step] + args + [trend_step],
-            )
-        ]
+        summary, processes, hosts, trend = overview_traffic(
+            c, start, end, wh, args, trend_step
+        )
         health = dict(
             c.execute(
                 "SELECT COALESCE(SUM(core_up+core_down),0) core,COALESCE(SUM(missed_up+missed_down),0) missed,COALESCE(SUM(gaps),0) gaps FROM health WHERE bucket>=? AND bucket<?",
@@ -581,7 +613,7 @@ def query(q):
             "summary": summary,
             "processes": processes,
             "hosts": hosts,
-            "connections": rows,
+            "connections": [],
             "trend": trend,
             "health": health,
             "status": dict(STATUS),

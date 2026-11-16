@@ -130,6 +130,10 @@ class ReleaseTests(unittest.TestCase):
         self.assertLessEqual(len(data["trend"]), 121)
         self.assertEqual(sum(r["up"] for r in data["trend"]), 500)
         self.assertEqual(sum(r["down"] for r in data["trend"]), 1000)
+        # The same connection spans many trend bars but is counted once per ranking.
+        self.assertEqual(data["summary"]["connections"], 1)
+        self.assertEqual(data["processes"][0]["connections"], 1)
+        self.assertEqual(data["hosts"][0]["connections"], 1)
 
     def test_invalid_filters(self):
         for q in [
@@ -141,6 +145,22 @@ class ReleaseTests(unittest.TestCase):
         ]:
             with self.assertRaises(ValueError):
                 l.query(q)
+
+    def test_overview_keeps_targets_without_domains_separate(self):
+        baseline = snapshot(2, 0, 0)
+        for i, connection in enumerate(baseline["connections"], start=1):
+            connection["metadata"].update(host="", destinationIP=f"192.0.2.{i}")
+        self.c.ingest(baseline, {}, self.now)
+        transferred = copy.deepcopy(baseline)
+        for connection in transferred["connections"]:
+            connection.update(upload=10, download=20)
+        transferred.update(uploadTotal=20, downloadTotal=40)
+        self.c.ingest(transferred, {}, self.now + 1)
+        self.c.flush()
+        self.assertEqual(
+            {row["host"]: row["down"] for row in self.query()["hosts"]},
+            {"192.0.2.1": 20, "192.0.2.2": 20},
+        )
 
     def test_static_assets_export_and_error_response(self):
         self.seed()
